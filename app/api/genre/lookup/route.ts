@@ -9,7 +9,6 @@ const ISRC_PATTERN = /^[A-Z]{2}[A-Z0-9]{3}[0-9]{7}$/;
 const MIN_REQUEST_INTERVAL_MS = 2_000;
 const REQUEST_TIMEOUT_MS = 20_000;
 const MAX_RETRIES = 5;
-const MAX_LOOKUP_COUNT = 1_000;
 let lastRequestAt = 0;
 let requestQueue: Promise<void> = Promise.resolve();
 
@@ -145,8 +144,8 @@ export async function POST(request: Request) {
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "ISRC list is invalid." }, { status: 400 });
   }
-  if (!isrcs.length || isrcs.length > MAX_LOOKUP_COUNT || isrcs.some((isrc) => !ISRC_PATTERN.test(isrc))) {
-    return NextResponse.json({ error: `Send 1–${MAX_LOOKUP_COUNT} valid ISRC codes per lookup run.` }, { status: 400 });
+  if (!isrcs.length || isrcs.some((isrc) => !ISRC_PATTERN.test(isrc))) {
+    return NextResponse.json({ error: "Send one or more valid ISRC codes per lookup run." }, { status: 400 });
   }
 
   const encoder = new TextEncoder();

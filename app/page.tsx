@@ -39,7 +39,7 @@ type ReviewSession = {
   saving?: boolean;
 };
 type DecisionLogEntry = { uri: string; criterion: string; decision: "approved" | "skipped"; reviewedAt: string };
-type GenreProgress = { current: number; total: number; message: string };
+type GenreProgress = { current: number; total: number; message: string; likedSongs?: number; analyzedTracks?: number };
 
 const REVIEW_LOG_KEY = "sonicsort:review-log:v1";
 
@@ -175,51 +175,65 @@ export default function Home() {
       setGenreProgress({
         current: 0,
         total: lookupJobs.length,
+        likedSongs: libraryStats?.savedItems ?? tracks.length,
+        analyzedTracks: cachedTrackIds.size,
         message: `Spotify returned ${libraryStats?.savedItems ?? tracks.length} saved items; sorting ${tracks.length} usable tracks${libraryStats?.localTracks ? `, skipped ${libraryStats.localTracks} local` : ""}${libraryStats?.unavailableItems ? ` and ${libraryStats.unavailableItems} unavailable` : ""}. ${cachedRows.length} mappings cached; ${lookupJobs.length} unique ISRCs need lookup${tracksWithoutIsrc ? ` (${tracksWithoutIsrc} tracks have no ISRC)` : ""}.`,
       });
 
       if (lookupJobs.length) {
-        const response = await fetch("/api/genre/lookup", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jobs: lookupJobs }),
-        });
-        if (!response.ok) {
-          const data = await response.json().catch(() => ({}));
-          throw new Error(data.error ?? "MusicBrainz lookup failed.");
-        }
-        if (!response.body) throw new Error("Genre lookup progress is unavailable in this browser.");
+        try {
+          const response = await fetch("/api/genre/lookup", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobs: lookupJobs }),
+          });
+          if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.error ?? "MusicBrainz lookup failed.");
+          }
+          if (!response.body) throw new Error("Genre lookup progress is unavailable in this browser.");
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let completed = false;
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const blocks = buffer.split("\n\n");
-          buffer = blocks.pop() ?? "";
-          for (const block of blocks) {
-            const eventName = block.match(/^event: (.+)$/m)?.[1];
-            const dataLine = block.match(/^data: (.+)$/m)?.[1];
-            if (!eventName || !dataLine) continue;
-            if (eventName === "heartbeat") continue;
-            const payload = JSON.parse(dataLine);
-            if (eventName === "result") {
-              const lookup = payload as { isrc: string; genres: string[] };
-              tagsByIsrc.set(lookup.isrc, lookup.genres);
-            } else if (eventName === "progress") {
-              const update = payload as GenreProgress;
-              setGenreProgress({ ...update, message: `${update.message} Requests are paced automatically.` });
-            } else if (eventName === "failure") {
-              throw new Error((payload as { error?: string }).error ?? "MusicBrainz lookup failed.");
-            } else if (eventName === "complete") {
-              completed = true;
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let completed = false;
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const blocks = buffer.split("\n\n");
+            buffer = blocks.pop() ?? "";
+            for (const block of blocks) {
+              const eventName = block.match(/^event: (.+)$/m)?.[1];
+              const dataLine = block.match(/^data: (.+)$/m)?.[1];
+              if (!eventName || !dataLine) continue;
+              if (eventName === "heartbeat") continue;
+              const payload = JSON.parse(dataLine);
+              if (eventName === "result") {
+                const lookup = payload as { isrc: string; genres: string[] };
+                tagsByIsrc.set(lookup.isrc, lookup.genres);
+              } else if (eventName === "progress") {
+                const update = payload as GenreProgress;
+                setGenreProgress((current) => ({
+                  ...current,
+                  ...update,
+                  total: lookupJobs.length,
+                  message: `${update.message} Requests are paced automatically.`,
+                }));
+              } else if (eventName === "failure") {
+                throw new Error((payload as { error?: string }).error ?? "MusicBrainz lookup failed.");
+              } else if (eventName === "complete") {
+                completed = true;
+              }
             }
           }
+          if (!completed) throw new Error("The progress connection ended before reporting completion. The server continues saving completed lookups; when it finishes, run genre sorting again to apply cached matches to Spotify playlists.");
+        } catch (caught) {
+          if (caught instanceof TypeError) {
+            throw new Error("Chrome interrupted the lookup progress connection. The server keeps processing and saving results; once it finishes, run genre sorting again to reuse the saved lookups.");
+          }
+          throw caught;
         }
-        if (!completed) throw new Error("The progress connection ended before reporting completion. The server continues saving completed lookups; when it finishes, run genre sorting again to apply cached matches to Spotify playlists.");
       }
 
       const destinations = startData.destinations as Array<{ id: string; name: string; playlistId: string; playlistName: string; url: string }>;
@@ -489,8 +503,11 @@ export default function Home() {
           {genreRunning && genreProgress && (
             <div className="progress-panel genre-progress-panel" role="status">
               <div className="progress-spinner"><LoaderCircle size={19} className="spin" /></div>
-              <div className="progress-copy"><strong>{genreProgress.message}</strong><span>Sorting your genres</span></div>
-              {genreProgress.total > 0 ? <span className="progress-count">{genreProgress.current} / {genreProgress.total}</span> : <span className="progress-pulse" />}
+              <div className="progress-copy">
+                <strong>{genreProgress.message}</strong>
+                <span>{genreProgress.likedSongs !== undefined ? `${genreProgress.likedSongs} Liked Songs · ${genreProgress.analyzedTracks ?? 0} already analyzed · ${genreProgress.total} unique ISRC lookups` : "Loading your Liked Songs"}</span>
+              </div>
+              {genreProgress.total > 0 ? <span className="progress-count">{genreProgress.current} / {genreProgress.total} ISRCs</span> : <span className="progress-pulse" />}
             </div>
           )}
 
